@@ -32,11 +32,13 @@ import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.function.Predicate;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
 import javax.servlet.http.HttpServlet;
 import javax.servlet.http.HttpServletRequest;
 import javax.servlet.http.HttpServletResponse;
+import org.apache.commons.compress.utils.Lists;
 import org.apache.hc.core5.http.ContentType;
 import org.apache.hc.core5.http.HttpHeaders;
 import org.apache.iceberg.exceptions.RESTException;
@@ -48,6 +50,7 @@ import org.apache.iceberg.rest.RESTUtil;
 import org.apache.iceberg.rest.ResourcePaths;
 import org.apache.iceberg.rest.responses.ErrorResponse;
 import org.apache.iceberg.rest.responses.OAuthTokenResponse;
+import org.junit.Assert;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import software.amazon.awssdk.auth.signer.AwsS3V4Signer;
@@ -78,8 +81,40 @@ public class S3SignerServlet extends HttpServlet {
       ImmutableMap.of(HttpHeaders.CONTENT_TYPE, ContentType.APPLICATION_JSON.getMimeType());
   private final ObjectMapper mapper;
 
+  private List<SignRequestValidator> s3SignRequestValidators = Lists.newArrayList();
+
+  /**
+   * SignRequestValidator is a wrapper class used for validating the actual contents of the
+   * S3SignRequest and thus verifying the contents the signer client puts in the request
+   */
+  public static class SignRequestValidator {
+    private final Predicate<S3SignRequest> verifyExpectation;
+    private final Predicate<S3SignRequest> signRequestExpectation;
+    private final String assertMessage;
+
+    public SignRequestValidator(
+        Predicate<S3SignRequest> requestValidatorPredicate,
+        Predicate<S3SignRequest> verifyExpectation,
+        String assertMessage) {
+      this.signRequestExpectation = requestValidatorPredicate;
+      this.verifyExpectation = verifyExpectation;
+      this.assertMessage = assertMessage;
+    }
+
+    void validateRequest(S3SignRequest request) {
+      if (verifyExpectation.test(request)) {
+        Assert.assertTrue(assertMessage, signRequestExpectation.test(request));
+      }
+    }
+  }
+
   public S3SignerServlet(ObjectMapper mapper) {
     this.mapper = mapper;
+  }
+
+  public S3SignerServlet(ObjectMapper mapper, List<SignRequestValidator> s3SignRequestValidators) {
+    this.mapper = mapper;
+    this.s3SignRequestValidators = s3SignRequestValidators;
   }
 
   @Override
@@ -188,6 +223,7 @@ public class S3SignerServlet extends HttpServlet {
         S3SignRequest s3SignRequest =
             castRequest(
                 S3SignRequest.class, mapper.readValue(request.getReader(), S3SignRequest.class));
+        s3SignRequestValidators.forEach(validator -> validator.validateRequest(s3SignRequest));
         S3SignResponse s3SignResponse = signRequest(s3SignRequest);
         if (CACHEABLE_METHODS.contains(SdkHttpMethod.fromValue(s3SignRequest.method()))) {
           // tell the client this can be cached
